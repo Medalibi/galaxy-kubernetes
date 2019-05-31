@@ -25,7 +25,7 @@ cat >$eks_config <<EOF
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata:
-  name: fsx-csi-driver
+  name: $CLUSTER_NAME 
   region: $AWS_REGION
   version: "1.12"
 
@@ -37,6 +37,11 @@ EOF
 # Create cluster
 echo "Creating EKS k8s cluster... 10 to 15 minutes..."
 eksctl create cluster -f $eks_config
+
+if [ $? -ne 0 ]; then
+    echo "Failed to create cluster" 1>&2
+    exit 1
+fi
 
 # Create policy
 policy=$DEPLOYMENT_FOLDER/policy.json
@@ -51,12 +56,12 @@ cat >$policy <<EOF
         "iam:AttachRolePolicy",
         "iam:PutRolePolicy"
        ],
-      "Resource": "arn:aws:iam::*:role/aws-service-role/fsx.amazonaws.com/*"
+      "Resource": "arn:aws:iam::*:role/aws-service-role/efs.amazonaws.com/*"
     },
     {
       "Effect": "Allow",
       "Action": [
-        "fsx:*"
+        "efs:*"
       ],
       "Resource": ["*"]
   }]
@@ -64,19 +69,24 @@ cat >$policy <<EOF
 EOF
 
 # create the IAM policy using the aws command line interface
-POLICY_ARN=$(aws iam create-policy --policy-name fsx-csi --policy-document file://$policy --query "Policy.Arn" --output text)
+POLICY_ARN=$(aws iam create-policy --policy-name efs-csi --policy-document file://$policy --query "Policy.Arn" --output text)
 
 # add this policy to your worker node IAM role:
-INSTANCE_ROLE_NAME=$(aws cloudformation describe-stacks --stack-name eksctl-fsx-csi-driver-nodegroup-ng-1 --output text --query "Stacks[0].Outputs[1].OutputValue" --region $AWS_REGION | sed -e 's/.*\///g')
+INSTANCE_ROLE_NAME=$(aws cloudformation describe-stacks --stack-name eksctl-${CLUSTER_NAME}-nodegroup-ng-1 --output text --query "Stacks[0].Outputs[1].OutputValue" --region $AWS_REGION | sed -e 's/.*\///g')
 aws iam attach-role-policy --policy-arn ${POLICY_ARN} --role-name ${INSTANCE_ROLE_NAME}
 
-# Install the FSx CSI Driver
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-fsx-csi-driver/master/deploy/kubernetes/manifest.yaml
+if [ $? -ne 0 ]; then
+    echo "Failed to attach policy" 1>&2
+    exit 2
+fi
 
-# verify that the fsx-csi-controller-0 and fsx-csi-node-* pods are Running in kube-system
+# Install the FSx CSI Driver
+#kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-fsx-csi-driver/master/deploy/kubernetes/manifest.yaml
+
+# verify that the efs-csi-controller-0 and efs-csi-node-* pods are Running in kube-system
 kubectl get pods -n kube-system
 
-echo "Check that all fsx-csi-controller and fsx-csi-node-* pods are running above. You can re-check by issueing:"
+echo "Check that all efs-csi-controller and efs-csi-node-* pods are running above. You can re-check by issueing:"
 echo "kubectl get pods -n kube-system"
 
-echo "If all looks fine, proceed with deploy_fsx_shared_fs.sh"
+echo "If all looks fine, proceed with deploy_efs_shared_fs.sh"
