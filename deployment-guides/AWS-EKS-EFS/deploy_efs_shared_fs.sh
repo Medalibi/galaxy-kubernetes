@@ -31,6 +31,10 @@ else
     exit 2
 fi
 
+# Add an ingress rule that opens up port 2049 from the 192.168.0.0/16 CIDR range:
+
+aws ec2 authorize-security-group-ingress --group-id ${security_group_id} --protocol tcp --port 2049 --cidr 192.168.0.0/16 --region $AWS_REGION
+
 echo "2. Creating mount target"
 
 aws efs create-mount-target --file-system-id $fs_id --subnet-id $subnet_id --security-group $security_group_id --region $AWS_REGION
@@ -46,4 +50,21 @@ echo "3. Provisioning persisent volumes"
 
 helm install stable/efs-provisioner --set efsProvisioner.efsFileSystemId=$fs_id --set efsProvisioner.awsRegion=$AWS_REGION
 
-create_pvc_from_efs.sh
+pvc=$DEPLOYMENT_FOLDER/claim.yaml
+cat >$pvc <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: efs-claim
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs
+  resources:
+    requests:
+      storage: 3600Gi
+EOF
+
+kubectl apply -f $pvc
+
+echo "Use galaxy.pvc=$pvc on helm"
