@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-export PATH=$(pwd):$PATH
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+export PATH=$(pwd):$SCRIPT_DIR:$PATH
 
 export AWS_REGION=us-west-2
 export CLUSTER_NAME=efs-csi-driver
@@ -28,5 +29,5 @@ deploy_efs_shared_fs.sh
 # Do the Galaxy setup
 
 helm repo add galaxy-helm-repo https://pcm32.github.io/galaxy-helm-charts
-helm install -f helm-hinxton-single-cell-aws.yaml galaxy-helm-repo/galaxy-stable
+helm install -f $SCRIPT_DIR/helm-hinxton-single-cell-aws.yaml galaxy-helm-repo/galaxy-stable
 
