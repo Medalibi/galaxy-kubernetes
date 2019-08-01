@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 
+export DEPLOYMENT_FOLDER=$(pwd)/deploy
+
 # Delete Galaxy helm
 
 helm delete $(helm list | grep "galaxy-stable" | awk -F'\t' '{print $1}')
-
-# Delete the EFS provisioner Helm
-
-helm delete $(helm list | grep "efs-provisioner" | awk -F'\t' '{print $1}')
 
 ################################################################################
 #
 # 1. Take down the file system and associated infrastructure 
 #
 ################################################################################
+
+# Delete the PVC
+
+kubectl delete -f $DEPLOYMENT_FOLDER/claim.yaml 
+
+# Delete the EFS provisioner Helm
+
+helm delete $(helm list | grep "efs-provisioner" | awk -F'\t' '{print $1}')
+
 # If a the file system exists, remove it
 
 fs_id=$(aws efs --region $AWS_REGION describe-file-systems --creation-token $FILESYSTEM_NAME --query "FileSystems[0].FileSystemId" --output text)
@@ -30,17 +37,22 @@ vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters "Nam
 if [ "$vpc_id" != 'None' ]; then
 
     subnet_id=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]},{\"Name\": \"tag:aws:cloudformation:logical-id\",\"Values\": [\"SubnetPrivateUSWEST2B\"]}]" --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
-    security_group_id=$(aws ec2 describe-security-groups --region $AWS_REGION --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}, {\"Name\": \"group-name\",\"Values\": [\"$SECURITY_GROUP_NAME\"]}]" --query "SecurityGroups[].GroupId" --output text)
+    security_group_ids=$(aws ec2 describe-security-groups --region $AWS_REGION --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --query "SecurityGroups[].GroupId" --output text)
 
     if [ -n "$security_group_id" ]; then
 
         # Delete security groups 
 
-        echo "Deleting security group $security_group_id"
-        aws ec2 delete-security-group --group-id $security_group_id --region $AWS_REGION
+        for sgid in $security_group_ids; do
+            echo "Deleting security group $sgid"
+            aws ec2 delete-security-group --group-id $sgid --region $AWS_REGION
+        done
     fi
 fi
-    
+
+echo "Deleting the VPC ..."
+aws ec2 delete-vpc --vpc-id $vpc_id --region $AWS_REGION
+
 # Give things a few seconds to disappear before trying to delete the file system
 
 sleep 10
@@ -65,7 +77,9 @@ policy_arn=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==
 
 if [ -n "$policy_arn" ]; then
     instance_role_name=$(aws cloudformation describe-stacks --stack-name eksctl-${CLUSTER_NAME}-nodegroup-ng-1 --output text --query "Stacks[0].Outputs[1].OutputValue" --region $AWS_REGION | sed -e 's/.*\///g')
+    echo "Detaching role policy $instance_role_name"
     aws iam detach-role-policy --policy-arn ${policy_arn} --role-name ${instance_role_name}
+    echo "Deleting policy $policy_arn"
     aws iam delete-policy --policy-arn $policy_arn
 fi
 
@@ -92,7 +106,5 @@ else
     echo "Cluster deletion failed" 1>&2
     exit 1
 fi
-
-
 
 
