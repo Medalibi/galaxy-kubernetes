@@ -2,15 +2,87 @@
 
 export DEPLOYMENT_FOLDER=$(pwd)/deploy
 
-# Delete Galaxy helm
+################################################################################
+#
+# Functions
+#
+################################################################################
 
-helm delete $(helm list | grep "galaxy-stable" | awk -F'\t' '{print $1}')
+function revoke_security_group_gress {
+    
+    local sgid=$1
+
+    if [ -z $sgid ]; then
+        echo "Supply an SGID"
+        return 1
+    fi
+
+    local json=$(aws ec2 describe-security-groups --group-id $sgid --query "SecurityGroups[0].IpPermissions" --region $AWS_REGION)
+    
+    if [ "$json" != "[]" ]; then
+        aws ec2 revoke-security-group-ingress --cli-input-json "{\"GroupId\": \"$sgid\", \"IpPermissions\": $json}" --region $AWS_REGION
+    fi
+
+    json=$(aws ec2 describe-security-groups --group-id $sgid --query "SecurityGroups[0].IpPermissionsEgress" --region $AWS_REGION)
+    
+    if [ "$json" != "[]" ]; then
+        aws ec2 revoke-security-group-egress --cli-input-json "{\"GroupId\": \"$sgid\", \"IpPermissions\": $json}" --region $AWS_REGION
+    fi
+}
+
+
+function delete_security_group {
+
+    local sgid=$1
+    local d_sgid=$2
+
+    if [ -z $sgid ]; then
+        echo "Supply an SGID"
+        return 1
+    fi
+    
+    # Find the interfaces that use this security group remove the association
+    interfaces_with_sg=$(aws ec2 describe-network-interfaces --region $AWS_REGION --filters "[{\"Name\": \"group-id\",\"Values\": [\"$sgid\"]}]" --query "NetworkInterfaces[].NetworkInterfaceId" --output text)
+
+    if [ -n "$interfaces_with_sg" ]; then 
+
+        for network_interface_id in $interfaces_with_sg; do
+            # Reset the security groups for the interface, excluding this sgid
+
+            interface_security_groups=$(aws ec2 describe-network-interfaces --region $AWS_REGION --network-interface-ids $network_interface_id --query "NetworkInterfaces[].Groups[].GroupId" --output text)
+            new_groups=${interface_security_groups/$sgid/}
+            if [[ -z "${new_groups// }" ]]; then
+                new_groups=$d_sgid
+            fi
+            
+            aws ec2 modify-network-interface-attribute --network-interface-id $network_interface_id --groups $new_groups --region $AWS_REGION                                
+        done
+
+    fi
+    
+    for fieldname in ip-permission.group-id egress.ip-permission.group-id; do 
+        dependent_security_groups=$(aws ec2 describe-security-groups --region $AWS_REGION --filters "[{\"Name\": \"$fieldname\",\"Values\": [\"$sgid\"]}]" --query "SecurityGroups[].GroupId" --output text)
+        
+        for dsg in dependent_security_groups; do
+            if [ -n "$dependent_security_groups" ]; then
+                revoke_security_group_gress $dsg
+            fi
+        done
+    done
+
+    aws ec2 delete-security-group --group-id $sgid --region $AWS_REGION
+}
+
 
 ################################################################################
 #
 # 1. Take down the file system and associated infrastructure 
 #
 ################################################################################
+
+# Delete Galaxy helm
+
+#helm delete $(helm list | grep "galaxy-stable" | awk -F'\t' '{print $1}')
 
 # Delete the PVC
 
@@ -25,33 +97,37 @@ helm delete $(helm list | grep "efs-provisioner" | awk -F'\t' '{print $1}')
 fs_id=$(aws efs --region $AWS_REGION describe-file-systems --creation-token $FILESYSTEM_NAME --query "FileSystems[0].FileSystemId" --output text)
 
 if [ "$fs_id" != 'None' ]; then
-    mount_target_id=$(aws efs describe-mount-targets --region $AWS_REGION --file-system-id $fs_id --query "MountTargets[0].MountTargetId" --output text)
+    mount_target_ids=$(aws efs describe-mount-targets --region $AWS_REGION --file-system-id $fs_id --query "MountTargets[].MountTargetId" --output text)
 
     # Delete mount targets
 
-    echo "Deleting mount target $mount_target_id"
-    aws efs delete-mount-target --mount-target-id $mount_target_id --region $AWS_REGION 
+    for mount_target_id in $mount_target_ids; do
+        echo "Deleting mount target $mount_target_id"
+        aws efs delete-mount-target --mount-target-id $mount_target_id --region $AWS_REGION 
+    done
 fi
 
 vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters "Name=tag:Name,Values=eksctl-${CLUSTER_NAME}-cluster/VPC" --query "Vpcs[0].VpcId")
 if [ "$vpc_id" != 'None' ]; then
 
-    subnet_id=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]},{\"Name\": \"tag:aws:cloudformation:logical-id\",\"Values\": [\"SubnetPrivateUSWEST2B\"]}]" --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
     security_group_ids=$(aws ec2 describe-security-groups --region $AWS_REGION --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --query "SecurityGroups[].GroupId" --output text)
+    default_security_group_id=$(aws ec2 describe-security-groups --region $AWS_REGION --filters "[{\"Name\": \"description\",\"Values\": [\"default VPC security group\"]},{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --query "SecurityGroups[].GroupId" --output text)
 
-    if [ -n "$security_group_id" ]; then
+    if [ -n "$security_group_ids" ]; then
 
         # Delete security groups 
 
         for sgid in $security_group_ids; do
+
+            if [ "$sgid" = "$default_security_group_id" ]; then
+                continue
+            fi
+
             echo "Deleting security group $sgid"
-            aws ec2 delete-security-group --group-id $sgid --region $AWS_REGION
+            delete_security_group $sgid $default_security_group_id
         done
     fi
 fi
-
-echo "Deleting the VPC ..."
-aws ec2 delete-vpc --vpc-id $vpc_id --region $AWS_REGION
 
 # Give things a few seconds to disappear before trying to delete the file system
 
