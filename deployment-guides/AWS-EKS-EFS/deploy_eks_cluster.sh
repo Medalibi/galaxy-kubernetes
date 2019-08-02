@@ -80,13 +80,44 @@ if [ $? -ne 0 ]; then
     exit 2
 fi
 
-# Install the FSx CSI Driver
-#kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-fsx-csi-driver/master/deploy/kubernetes/manifest.yaml
+# Create a security group to allow external access to Galaxy port
 
-# verify that the efs-csi-controller-0 and efs-csi-node-* pods are Running in kube-system
-kubectl get pods -n kube-system
+vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters "Name=tag:Name,Values=eksctl-${CLUSTER_NAME}-cluster/VPC" --query "Vpcs[0].VpcId")
+galaxy_access_security_group_id=$(aws ec2 create-security-group --group-name ext-galaxy-access --vpc-id ${vpc_id} --description "Galaxy access" --query "GroupId" --output text --region $AWS_REGION)
 
-echo "Check that all efs-csi-controller and efs-csi-node-* pods are running above. You can re-check by issueing:"
-echo "kubectl get pods -n kube-system"
+if [ $? -eq 0 ]; then
+    echo -e "Created security group with ID $galaxy_access_security_group_id for Galaxy access"
+else
+    echo "Could not create security group" 1>&2
+    exit 2
+fi
 
-echo "If all looks fine, proceed with deploy_efs_shared_fs.sh"
+# Actually allow the ingress
+
+echo "Allowing ingress to port 30700 for security group $galaxy_access_security_group_id"
+aws ec2 authorize-security-group-ingress --group-id ${galaxy_access_security_group_id} --protocol tcp --port 30700 --cidr 0.0.0.0/0 --region $AWS_REGION
+
+# Associate the new security group with the running instances. Need to do this
+# via the network interfaces, since there may be multiple per instance. First
+# find the public IPs
+
+instance_public_ips=$(aws ec2 describe-instances --region $AWS_REGION --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --query "Reservations[].Instances[].NetworkInterfaces[].Association.PublicIp" --output text)
+
+# For each public IP find the interface and add the new security group to it
+
+for ipi in $instance_public_ips; do
+
+    network_interface_id=$(aws ec2 describe-network-interfaces --region $AWS_REGION  --filters "[{\"Name\": \"association.public-ip\",\"Values\": [\"$ipi\"]}, {\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --query "NetworkInterfaces[].NetworkInterfaceId" --output text)
+    
+    echo "Adding Galaxy access security group $galaxy_access_security_group_id to network interface $network_interface_id"
+
+    interface_security_groups=$(aws ec2 describe-network-interfaces --region $AWS_REGION --network-interface-ids $network_interface_id --query "NetworkInterfaces[].Groups[].GroupId" --output text)
+    aws ec2 modify-network-interface-attribute --network-interface-id $network_interface_id --groups $interface_security_groups $galaxy_access_security_group_id --region $AWS_REGION
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to add Galaxy access security group $galaxy_access_security_group_id to network interface $network_interface_id" 1>&2
+        exit 2
+    fi
+done
+
+echo "Cluster created and configured successfully!"
