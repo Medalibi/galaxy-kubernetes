@@ -2,7 +2,7 @@
 
 echo "1. Creating EFS file system"
 
-aws efs create-file-system --creation-token "$FILESYSTEM_NAME" --performance-mode generalPurpose --throughput-mode bursting --region $AWS_REGION --tags Key=Name,Value="Test File System" Key=developer,Value="jon.manning.ebi"
+aws efs create-file-system --creation-token "$FILESYSTEM_NAME" --performance-mode generalPurpose --throughput-mode bursting --region $AWS_REGION --tags Key=Name,Value="Galaxy filesystem" Key=developer,Value="$DEVELOPER"
 fs_id=$(aws efs --region $AWS_REGION describe-file-systems --creation-token $FILESYSTEM_NAME --query "FileSystems[0].FileSystemId" --output text)
 
 echo -e "Created file system ID $fs_id"
@@ -10,16 +10,6 @@ echo -e "Created file system ID $fs_id"
 # Derive networking info from the cluster
 
 vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters "Name=tag:Name,Values=eksctl-${CLUSTER_NAME}-cluster/VPC" --query "Vpcs[0].VpcId")
-
-# Get a private subnet. We get logical IDs like 'SubnetPrivateUSWEST2B',
-# 'SubnetPrivateUSWEST2C', but don't seem to be able to guarantee specific
-# values. So just use a wildcard to fetch the first private subnet and use that
-
-subnet_id=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]},{\"Name\": \"tag:aws:cloudformation:logical-id\",\"Values\": [\"SubnetPrivateUSWEST*\"]}]" --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
-if [ "$subnet_id" = 'None' ]; then
-    echo "Can't derive subnet" 1>&2
-    exit 1
-fi
 
 # Create a security group
 
@@ -35,16 +25,22 @@ fi
 
 aws ec2 authorize-security-group-ingress --group-id ${security_group_id} --protocol tcp --port 2049 --cidr 192.168.0.0/16 --region $AWS_REGION
 
-echo "2. Creating mount target"
+echo "2. Creating mount targets for each subnet"
 
-aws efs create-mount-target --file-system-id $fs_id --subnet-id $subnet_id --security-group $security_group_id --region $AWS_REGION
-if [ $? -eq 0 ]; then
-    mount_target_id=$(aws efs describe-mount-targets --region $AWS_REGION --file-system-id $fs_id --query "MountTargets[0].MountTargetId" --output text)
-    echo "Created mount target with ID $mount_target_id"
-else
-    echo "Could not create mount target" 1>&2
-    exit 3
-fi
+subnet_ids=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]},{\"Name\": \"tag:aws:cloudformation:logical-id\",\"Values\": [\"SubnetPrivateUSWEST*\"]}]" --region $AWS_REGION --query "Subnets[].SubnetId" --output text)
+
+for subnet_id in $subnet_ids; do
+
+    aws efs create-mount-target --file-system-id $fs_id --subnet-id $subnet_id --security-group $security_group_id --region $AWS_REGION
+    if [ $? -eq 0 ]; then
+        mount_target_id=$(aws efs describe-mount-targets --region $AWS_REGION --file-system-id $fs_id --query "MountTargets[0].MountTargetId" --output text)
+        echo "Created mount target with ID $mount_target_id"
+    else
+        echo "Could not create mount target" 1>&2
+        exit 3
+    fi
+
+done
 
 echo "3. Provisioning persisent volumes"
 
