@@ -42,9 +42,48 @@ for subnet_id in $subnet_ids; do
 
 done
 
+# The mount targets take a little while to create
+
+mount_targets_ready=no
+mt_wait_loops=1
+max_mt_wait_loops=10
+echo "Waiting for mount points to be available"
+
+while [ "$mount_targets_ready" = 'no' ]; do
+    
+    loop_mt_ready=yes
+    mount_target_states=$(aws efs describe-mount-targets --region $AWS_REGION --file-system-id $fs_id --query "MountTargets[].LifeCycleState" --output text)
+
+    for mts in $mount_target_states; do
+        if [ "$mts" != 'available' ]; then
+            loop_mt_ready=no
+            break
+        fi
+    done
+
+    if [ "$loop_mt_ready" = 'yes' ]; then
+        mount_targets_ready=yes
+    else
+        echo -n '.' 
+        sleep 10
+        mt_wait_loops=$[$mt_wait_loops+1]
+    fi
+done
+
+echo "Mount points ready"
+
 echo "3. Provisioning persisent volumes"
 
 helm install stable/efs-provisioner --set efsProvisioner.efsFileSystemId=$fs_id --set efsProvisioner.awsRegion=$AWS_REGION
+
+sleep 5
+
+kubectl get pods --field-selector status.phase=Running | grep "efs-provisioner"
+
+if [ $? -ne 0 ]; then
+    echo "EFS helm deployment failed"
+    exit 1
+fi
 
 pvc=$DEPLOYMENT_FOLDER/claim.yaml
 cat >$pvc <<EOF
