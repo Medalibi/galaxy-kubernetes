@@ -66,11 +66,11 @@ function delete_security_group {
     for fieldname in ip-permission.group-id egress.ip-permission.group-id; do 
         dependent_security_groups=$(aws ec2 describe-security-groups --region $AWS_REGION --filters "[{\"Name\": \"$fieldname\",\"Values\": [\"$sgid\"]}]" --query "SecurityGroups[].GroupId" --output text)
         
-        for dsg in dependent_security_groups; do
-            if [ -n "$dependent_security_groups" ]; then
+        if [ -n "$dependent_security_groups" ]; then
+            for dsg in $dependent_security_groups; do
                 revoke_security_group_gress $dsg
-            fi
-        done
+            done
+        fi
     done
 
     aws ec2 delete-security-group --group-id $sgid --region $AWS_REGION
@@ -85,7 +85,7 @@ function delete_security_group {
 
 # Delete Galaxy helm
 
-#helm delete $(helm list | grep "galaxy-stable" | awk -F'\t' '{print $1}')
+helm delete $(helm list | grep "galaxy-stable" | awk -F'\t' '{print $1}')
 
 # Delete the PVC
 
