@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
-export DEPLOYMENT_FOLDER=$(pwd)/deploy
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+export PATH=$(pwd):$SCRIPT_DIR:$PATH
+
+source $SCRIPT_DIR/env.sh
 
 ################################################################################
 #
