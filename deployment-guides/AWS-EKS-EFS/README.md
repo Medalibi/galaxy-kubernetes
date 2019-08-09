@@ -15,7 +15,7 @@ git clone git@github.com:ebi-gene-expression-group/galaxy-kubernetes.git
 
 ### Environment
 
-Edit `<checkout_dir>/deployment-guides/AWS-EKS-EFS/destroy-all.sh`. In particular you'll need to modify DEVELOPER and AWS_REGION:
+Edit `<checkout_dir>/deployment-guides/AWS-EKS-EFS/env.sh`. In particular you'll need to modify DEVELOPER and AWS_REGION:
 
 ```
 export DEVELOPER=<your amazon account ID>
