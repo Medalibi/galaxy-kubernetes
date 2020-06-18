@@ -2,18 +2,18 @@
 
 echo "1. Creating EFS file system"
 
-aws efs create-file-system --creation-token "$FILESYSTEM_NAME" --performance-mode generalPurpose --throughput-mode bursting --region $AWS_REGION --tags Key=Name,Value="Galaxy filesystem" Key=developer,Value="$DEVELOPER"
+aws efs create-file-system --creation-token "$FILESYSTEM_NAME" --performance-mode maxIO --throughput-mode bursting --region $AWS_REGION --tags Key=Name,Value="Galaxy filesystem" Key=developer,Value="$DEVELOPER"
 fs_id=$(aws efs --region $AWS_REGION describe-file-systems --creation-token $FILESYSTEM_NAME --query "FileSystems[0].FileSystemId" --output text)
 
 echo -e "Created file system ID $fs_id"
 
 # Derive networking info from the cluster
 
-vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters "Name=tag:Name,Values=eksctl-${CLUSTER_NAME}-cluster/VPC" --query "Vpcs[0].VpcId")
+vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --query "Vpcs[0].VpcId")
 
 # Create a security group
 
-security_group_id=$(aws ec2 create-security-group --group-name $SECURITY_GROUP_NAME --vpc-id ${vpc_id} --description "EFS Security Group" --query "GroupId" --output text --region $AWS_REGION)
+security_group_id=$(aws ec2 create-security-group --group-name $SECURITY_GROUP_NAME --vpc-id ${vpc_id} --description "Galaxy EFS Security Group" --query "GroupId" --output text --region $AWS_REGION)
 if [ $? -eq 0 ]; then
     echo -e "Created security group with ID $security_group_id"
 else
@@ -27,7 +27,7 @@ aws ec2 authorize-security-group-ingress --group-id ${security_group_id} --proto
 
 echo "2. Creating mount targets for each subnet"
 
-subnet_ids=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]},{\"Name\": \"tag:aws:cloudformation:logical-id\",\"Values\": [\"SubnetPrivateUSWEST*\"]}]" --region $AWS_REGION --query "Subnets[].SubnetId" --output text)
+subnet_ids=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --region $AWS_REGION --query "Subnets[].SubnetId" --output text)
 
 for subnet_id in $subnet_ids; do
 
@@ -85,6 +85,16 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+cls=$DEPLOYMENT_FOLDER/class.yaml
+cat >$cls <<EOF
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: aws-efs
+provisioner: example.com/aws-efs
+
+EOF
+
 pvc=$DEPLOYMENT_FOLDER/claim.yaml
 cat >$pvc <<EOF
 apiVersion: v1
@@ -97,9 +107,11 @@ spec:
   storageClassName: efs
   resources:
     requests:
-      storage: 3600Gi
+      storage: 900Gi
+      
 EOF
 
+kubectl apply -f $cls
 kubectl apply -f $pvc
 
 echo "Use galaxy.pvc=$pvc on helm"
