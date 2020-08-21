@@ -19,19 +19,70 @@ export DEPLOYMENT_FOLDER=${2:-$DEPLOYMENT_FOLDER}
 [ ! -z ${AWS_REGION+x} ] || ( echo "Env var AWS_REGION with a valid region needs to be set." && exit 1 )
 [ ! -z ${DEPLOYMENT_FOLDER+x} ] || ( echo "Env var DEPLOYMENT_FOLDER with a valid folder to store deploy needs to be set." && exit 1 )
 
+# Collecting the default VPC and subnets details to be used in the EKS cluster creation
+vpc_id=$(aws ec2 describe-vpcs --output text --region $AWS_REGION --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --query "Vpcs[0].VpcId")
+subnet_id=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
+availability_zone=$(aws ec2 describe-subnets --filters "[{\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --region $AWS_REGION --query "Subnets[0].AvailabilityZone" --output text)
+
+#Create Galaxy system access security Groups
+security_group_id=$(aws ec2 create-security-group --group-name galaxy-eks-access-sg --vpc-id ${vpc_id} --description "Galxy Cluster Security Group" --query "GroupId" --output text --region $AWS_REGION)
+aws ec2 authorize-security-group-ingress --group-id $security_group_id --protocol tcp --port 80 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $security_group_id --protocol tcp --port 443 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $security_group_id --protocol tcp --port 30700 --cidr 0.0.0.0/0
+
+# Export the EKS cluster security group ID to be addeded to the EFS seciryt group permissions
+export GALAXY_EKS_SG_ID="$security_group_id"
+
 # Setup config for EKS
 eks_config=$DEPLOYMENT_FOLDER/cluster.yaml
 cat >$eks_config <<EOF
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata:
-  name: $CLUSTER_NAME 
+  name: $CLUSTER_NAME
   region: $AWS_REGION
-  version: "1.12"
+  version: "1.14"
+
+#vpc:
+#  id: $vpc_id
+#  subnets:
+#    public:
+#      $availability_zone:
+#        id: $subnet_id
 
 nodeGroups:
-  - name: ng-1
+  - name: galaxy-eks-ng
+    instanceType: m5.2xlarge
+    minSize: 1
     desiredCapacity: 2
+    maxSize: 6
+    ssh:
+      allow: true
+      publicKeyName: $AWS_EC2_ACCESS_KEY
+    volumeSize: 150
+    volumeType: io1
+    volumeIOPS: 3000
+    ami: auto
+    amiFamily: AmazonLinux2
+    availabilityZones: ["$availability_zone"]
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        efs: true
+        ebs: true
+        imageBuilder: true
+        albIngress: true
+    securityGroups:
+      withShared: true
+      withLocal: true
+      attachIDs: [ '$security_group_id' ]
+    instanceName: Galaxy-EKS-Cluster-nodes
+    tags:
+      team: TrainingTeam
+      Project: SingleCell
+
+availabilityZones: ['$availability_zone']
+
 EOF
 
 # Create cluster
@@ -108,7 +159,7 @@ instance_public_ips=$(aws ec2 describe-instances --region $AWS_REGION --filters 
 for ipi in $instance_public_ips; do
 
     network_interface_id=$(aws ec2 describe-network-interfaces --region $AWS_REGION  --filters "[{\"Name\": \"association.public-ip\",\"Values\": [\"$ipi\"]}, {\"Name\": \"vpc-id\",\"Values\": [\"$vpc_id\"]}]" --query "NetworkInterfaces[].NetworkInterfaceId" --output text)
-    
+
     echo "Adding Galaxy access security group $galaxy_access_security_group_id to network interface $network_interface_id"
 
     interface_security_groups=$(aws ec2 describe-network-interfaces --region $AWS_REGION --network-interface-ids $network_interface_id --query "NetworkInterfaces[].Groups[].GroupId" --output text)
